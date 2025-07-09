@@ -1,0 +1,138 @@
+// index.js (PowerMax Infinity™ Catalog Addon)
+const express = require('express');
+const fetch = require('node-fetch');
+const app = express();
+const PORT = process.env.PORT || 3000;
+
+// Your API keys
+const TMDB_KEY = '7182154a3947520b2fa1b7e4ef906897';
+const OMDB_KEY = 'AIzaSyBfrc-Fi7k8zs6MXzFS-br7jfS08NUCFJw';
+
+// Manifest endpoint
+app.get('/manifest.json', (req, res) => {
+  res.json({
+    id: "org.powermax.infinity",
+    version: "1.0.0",
+    name: "PowerMax Infinity™ Catalog",
+    description: "Trending, Top Rated, and New Movies/Series with multi-source ratings",
+    logo: "https://i.imgur.com/jW8zV4z.png",
+    resources: ["catalog", "meta"],
+    types: ["movie", "series"],
+    catalogs: [
+      { type: "movie",  id: "trending", name: "🔥 Trending Movies" },
+      { type: "movie",  id: "top",      name: "⭐ Top Rated Movies" },
+      { type: "movie",  id: "new",      name: "🆕 New Movies" },
+      { type: "series", id: "trending", name: "🔥 Trending Series" },
+      { type: "series", id: "top",      name: "⭐ Top Rated Series" },
+      { type: "series", id: "new",      name: "🆕 New Series" }
+    ],
+    idPrefixes: ["tt"]
+  });
+});
+
+// Helper: call TMDb
+const tmdbApi = async (url) => {
+  const sep = url.includes('?') ? '&' : '?';
+  const res = await fetch(`${url}${sep}api_key=${TMDB_KEY}`);
+  return res.json();
+};
+
+// Helper: call OMDb by IMDb ID
+const omdbApi = async (imdbId) => {
+  const res = await fetch(`https://www.omdbapi.com/?apikey=${OMDB_KEY}&i=${imdbId}`);
+  return res.json();
+};
+
+// Map a TMDb item to a Stremio meta object (with multi-source ratings)
+const mapToMeta = async (item, type = "movie") => {
+  // pull IMDb ID from external_ids (fetched via append_to_response)
+  const imdb_id = item.external_ids?.imdb_id;
+  let omdb = {};
+  if (imdb_id) omdb = await omdbApi(imdb_id);
+
+  return {
+    id: imdb_id || `tmdb-${item.id}`,
+    type,
+    name: item.title || item.name,
+    poster: item.poster_path
+      ? `https://image.tmdb.org/t/p/w500${item.poster_path}`
+      : undefined,
+    background: item.backdrop_path
+      ? `https://image.tmdb.org/t/p/original${item.backdrop_path}`
+      : undefined,
+    description: item.overview || "",
+    year: (item.release_date || item.first_air_date || "").slice(0, 4),
+    genres: (item.genres || []).map(g => g.name),
+    runtime: item.runtime || item.episode_run_time?.[0] || undefined,
+    imdbRating: omdb.imdbRating || "",
+    rtRating: (omdb.Ratings?.find(r => r.Source === "Rotten Tomatoes") || {}).Value || "",
+    metacritic: omdb.Metascore || "",
+    tmdbRating: item.vote_average,
+    votes: omdb.imdbVotes || ""
+  };
+};
+
+// Catalog endpoint
+app.get('/catalog/:type/:id/:extra?.json', async (req, res) => {
+  const { type, id } = req.params;
+  let tmdbUrl = "";
+
+  if (type === "movie") {
+    if (id === "trending") tmdbUrl = `https://api.themoviedb.org/3/trending/movie/week`;
+    if (id === "top")      tmdbUrl = `https://api.themoviedb.org/3/movie/top_rated`;
+    if (id === "new")      tmdbUrl = `https://api.themoviedb.org/3/movie/now_playing`;
+  } else {
+    if (id === "trending") tmdbUrl = `https://api.themoviedb.org/3/trending/tv/week`;
+    if (id === "top")      tmdbUrl = `https://api.themoviedb.org/3/tv/top_rated`;
+    if (id === "new")      tmdbUrl = `https://api.themoviedb.org/3/tv/on_the_air`;
+  }
+
+  const data = await tmdbApi(tmdbUrl);
+  const metas = await Promise.all(
+    (data.results || []).slice(0, 20).map(async item => {
+      const details = await tmdbApi(
+        `https://api.themoviedb.org/3/${type === "movie" ? "movie" : "tv"}/${item.id}` +
+        `?append_to_response=external_ids,genres`
+      );
+      return mapToMeta(details, type);
+    })
+  );
+
+  res.json({ metas: metas.filter(Boolean) });
+});
+
+// Meta endpoint
+app.get('/meta/:type/:id.json', async (req, res) => {
+  const { type, id } = req.params;
+  // find by IMDb ID via TMDb find endpoint
+  const find = await tmdbApi(
+    `https://api.themoviedb.org/3/find/${id}?external_source=imdb_id`
+  );
+  const result = type === "movie"
+    ? (find.movie_results || [])[0]
+    : (find.tv_results || [])[0];
+  if (!result) return res.json({});
+
+  const details = await tmdbApi(
+    `https://api.themoviedb.org/3/${type === "movie" ? "movie" : "tv"}/${result.id}` +
+    `?append_to_response=external_ids,genres`
+  );
+  const meta = await mapToMeta(details, type);
+  res.json({ meta });
+});
+
+// Start server
+app.listen(PORT, () => {
+  console.log(`PowerMax Infinity™ Catalog running on port ${PORT}`);
+});{
+  "name": "powermax-catalog",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "start": "node index.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "node-fetch": "^2.6.7"
+  }
+}
